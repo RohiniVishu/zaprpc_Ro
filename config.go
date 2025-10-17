@@ -7,17 +7,15 @@ import (
 	"go.uber.org/zap"
 )
 
-type ServerConfig struct {
-	TLSConfig     *tls.Config
-	QUICConfig    *quic.Config
-	QUICTransport *quic.Transport
-	Codec         Codec
-	Logger        *zap.Logger
+type ClientConfig struct {
+	Logger *zap.Logger
+	Codec  Codec
 }
 
-type ClientConfig struct {
-	Codec  Codec
-	Logger *zap.Logger
+type ServerConfig struct {
+	Logger    *zap.Logger
+	Codec     Codec
+	TLSConfig *tls.Config
 }
 
 type ConnectionConfig struct {
