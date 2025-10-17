@@ -17,7 +17,6 @@ type Client struct {
 }
 
 func NewClient(cfg *ClientConfig) *Client {
-
 	var clientCfg ClientConfig
 	if cfg != nil {
 		clientCfg = *cfg
@@ -25,7 +24,6 @@ func NewClient(cfg *ClientConfig) *Client {
 	if clientCfg.Logger == nil {
 		clientCfg.Logger = zap.NewNop()
 	}
-
 	if clientCfg.Codec == nil {
 		clientCfg.Codec = &GOBCodec{}
 	}
@@ -33,7 +31,7 @@ func NewClient(cfg *ClientConfig) *Client {
 		logger: clientCfg.Logger,
 		codec:  clientCfg.Codec,
 	}
-	c.logger.Info("Client object created")
+	c.logger.Info("Client created")
 	return c
 }
 
@@ -57,20 +55,18 @@ func NewConn(ctx context.Context, target string, cfg *ConnectionConfig) (quic.Co
 			NextProtos:         []string{"zaprpc"},
 		}
 	}
-
 	if connectionCfg.QUICConfig == nil {
 		connectionCfg.QUICConfig = &quic.Config{
 			KeepAlivePeriod: 15 * time.Second,
 		}
 	}
-
 	conn, err := quic.DialAddr(ctx, target, connectionCfg.TLSConfig, connectionCfg.QUICConfig)
 	if err != nil {
-
 		return nil, fmt.Errorf("failed to dial: %w", err)
 	}
 	return conn, nil
 }
+
 func (c *Client) WithLogger(logger *zap.Logger) *Client {
 	if logger != nil {
 		c.logger = logger
@@ -92,12 +88,14 @@ func (c *Client) Codec() string {
 func (c *Client) Zap(conn quic.Connection, serviceMethod string, args ...any) (any, error) {
 	codec := c.codec
 	logger := c.logger
+
 	stream, err := conn.OpenStream()
 	if err != nil {
-		logger.Debug("Failed to open stream", zap.String("details", err.Error()))
+		logger.Error("Failed to open stream", zap.Error(err))
 		return nil, fmt.Errorf("failed to open stream: %w", err)
 	}
 	defer stream.Close()
+
 	req := struct {
 		ServiceMethod string
 		Args          []any
@@ -108,18 +106,22 @@ func (c *Client) Zap(conn quic.Connection, serviceMethod string, args ...any) (a
 
 	err = codec.Marshal(stream, req)
 	if err != nil {
-		logger.Debug("Error encoding request", zap.String("details", err.Error()))
+		logger.Error("Error encoding request", zap.Error(err))
 		return nil, fmt.Errorf("failed to encode request: %w", err)
 	}
+
 	var resp ZapResponse
 	err = codec.Unmarshal(stream, &resp)
 	if err != nil {
-		logger.Debug("Error decoding response", zap.String("details", err.Error()))
+		logger.Error("Error decoding response", zap.Error(err))
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
+
 	if err, ok := resp.Value.(struct{ Error string }); ok && err.Error != "" {
+		logger.Warn("RPC returned error", zap.String("error", err.Error))
 		return nil, errors.New(err.Error)
 	}
 
+	logger.Info("RPC call successful", zap.String("method", serviceMethod))
 	return resp.Value, nil
 }

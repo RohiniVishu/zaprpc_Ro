@@ -19,10 +19,7 @@ func isGracefulClose(err error) bool {
 		return true
 	}
 	var appErr *quic.ApplicationError
-	if errors.As(err, &appErr) {
-		return true
-	}
-	return false
+	return errors.As(err, &appErr)
 }
 
 func isTimeout(err error) bool {
