@@ -33,9 +33,7 @@ func NewClient(cfg *ClientConfig) *Client {
 		codec:  clientCfg.Codec,
 	}
 
-	// Informational lifecycle message: client created
 	c.logger.Info("client created")
-	// Debug details helpful while diagnosing client config
 	c.logger.Debug("client configuration", zap.Bool("has-custom-logger", clientCfg.Logger != nil), zap.String("codec", c.Codec()))
 	return c
 }
@@ -83,8 +81,13 @@ func (c *Client) Zap(conn quic.Connection, serviceMethod string, args ...any) (a
 
 	stream, err := conn.OpenStream()
 	if err != nil {
-		// Opening stream failed: this is an operational error
-		logger.Error("failed to open stream", zap.String("method", serviceMethod), zap.Error(err))
+		if isGracefulClose(err) {
+			logger.Info("stream closed gracefully", zap.String("method", serviceMethod))
+		} else if isTimeout(err) {
+			logger.Debug("stream timeout", zap.String("method", serviceMethod), zap.Error(err))
+		} else {
+			logger.Error("failed to open stream", zap.String("method", serviceMethod), zap.Error(err))
+		}
 		return nil, fmt.Errorf("failed to open stream: %w", err)
 	}
 	defer stream.Close()
@@ -97,16 +100,20 @@ func (c *Client) Zap(conn quic.Connection, serviceMethod string, args ...any) (a
 		Args:          args,
 	}
 
-	// encode request
 	if err = codec.Marshal(stream, req); err != nil {
 		logger.Error("failed to encode request", zap.String("method", serviceMethod), zap.Error(err))
 		return nil, fmt.Errorf("failed to encode request: %w", err)
 	}
 
 	var resp ZapResponse
-	// decode response
 	if err = codec.Unmarshal(stream, &resp); err != nil {
-		logger.Error("failed to decode response", zap.String("method", serviceMethod), zap.Error(err))
+		if isGracefulClose(err) {
+			logger.Info("response stream closed gracefully", zap.String("method", serviceMethod))
+		} else if isTimeout(err) {
+			logger.Debug("response decode timeout", zap.String("method", serviceMethod), zap.Error(err))
+		} else {
+			logger.Error("failed to decode response", zap.String("method", serviceMethod), zap.Error(err))
+		}
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
