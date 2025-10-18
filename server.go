@@ -43,7 +43,6 @@ func NewServer(cfg *ServerConfig) *Server {
 	if serverCfg.TLSConfig == nil {
 		serverCfg.TLSConfig = generateTLSConfig()
 	}
-
 	if serverCfg.Codec == nil {
 		serverCfg.Codec = &GOBCodec{}
 	}
@@ -55,133 +54,48 @@ func NewServer(cfg *ServerConfig) *Server {
 		codec:    serverCfg.Codec,
 		logger:   serverCfg.Logger,
 	}
-	s.logger.Info("Server object created")
+	// Info-level lifecycle log
+	s.logger.Info("Server created")
+	// Debug log for configuration
+	s.logger.Debug("Server configuration",
+		zap.String("codec", s.Codec()),
+		zap.Bool("custom-logger", serverCfg.Logger != nil),
+	)
 	return s
-}
-
-func NewTransport(addr string, logger *zap.Logger) (*quic.Transport, error) {
-	if logger == nil {
-		logger = zap.NewNop()
-	}
-	baseAddr, err := net.ResolveUDPAddr("udp", addr)
-	if err != nil {
-		logger.Error("Invalid UDP address", zap.Error(err))
-		return nil, fmt.Errorf("invalid UDP address %q: %w", addr, err)
-	}
-
-	port := baseAddr.Port
-	if port == 0 {
-		port = 6121
-	}
-
-	const maxRetries = 32
-
-	for i := 0; i < maxRetries; i++ {
-		tryPort := port + i
-		tryAddr := &net.UDPAddr{
-			IP:   baseAddr.IP,
-			Port: tryPort,
-		}
-
-		conn, err := net.ListenUDP("udp", tryAddr)
-		if err == nil {
-			tr := &quic.Transport{Conn: conn}
-
-			logger.Info("Created QUIC transport",
-				zap.String("addr", tryAddr.String()),
-			)
-
-			return tr, nil
-		}
-
-		var opErr *net.OpError
-		if errors.As(err, &opErr) {
-			if errno, ok := opErr.Err.(syscall.Errno); ok && errno == syscall.EADDRINUSE {
-				logger.Warn("Port busy, trying another port", zap.Int("port", tryPort))
-				continue
-			}
-		}
-		return nil, fmt.Errorf("failed to bind UDP %d: %w", tryPort, err)
-	}
-	ephemeral := &net.UDPAddr{IP: baseAddr.IP, Port: 0}
-	udp, err := net.ListenUDP("udp", ephemeral)
-	if err != nil {
-		return nil, fmt.Errorf("failed ephemeral UDP bind: %w", err)
-	}
-	logger.Info("Created QUIC transport (ephemeral)", zap.String("addr", udp.LocalAddr().String()))
-	return &quic.Transport{Conn: udp}, nil
-}
-
-func (s *Server) WithTransport(transport *quic.Transport) *Server {
-
-	if transport != nil {
-		s.tr = transport
-	}
-	return s
-}
-func (s *Server) WithQUICConfig(quicConfig *quic.Config) *Server {
-
-	if quicConfig != nil {
-		s.quicCfg = quicConfig
-	}
-	return s
-}
-func (s *Server) WithTLSConfig(tlsConfig *tls.Config) *Server {
-	if tlsConfig != nil {
-		s.tlsCfg = tlsConfig
-	}
-	return s
-}
-func (s *Server) WithLogger(logger *zap.Logger) *Server {
-	if logger != nil {
-		s.logger = logger
-	}
-	return s
-}
-
-func (s *Server) WithCodec(codec Codec) *Server {
-	if codec != nil {
-		s.codec = codec
-	}
-	return s
-}
-
-func (s *Server) Codec() string {
-	return s.codec.Name()
 }
 
 func (s *Server) RegisterService(name string, service any) {
 	s.services[name] = service
-	s.logger.Info("Service added", zap.String("service-name", name))
+	s.logger.Info("Service registered", zap.String("service", name))
 }
 
 func (s *Server) Serve(ctx context.Context) error {
+	logger := s.logger
 	var (
 		tr           *quic.Transport
 		ln           *quic.Listener
 		err          error
 		ownTransport bool
 	)
-	logger := s.logger
 	if s.tr != nil {
 		tr = s.tr
 	} else {
 		tr, err = NewTransport(":6121", logger)
 		if err != nil {
-			logger.Error("UDP transport creation error", zap.Error(err))
+			logger.Error("Transport creation failed", zap.Error(err))
 			return err
 		}
 		ownTransport = true
 	}
-
 	defer func() {
 		if ownTransport && tr != nil {
 			_ = tr.Close()
 		}
 	}()
+
 	ln, err = tr.Listen(s.tlsCfg, s.quicCfg)
 	if err != nil {
-		logger.Error("Listener failure", zap.Error(err))
+		logger.Error("Listener failed", zap.Error(err))
 		return err
 	}
 	defer ln.Close()
@@ -195,16 +109,17 @@ func (s *Server) Serve(ctx context.Context) error {
 				logger.Info("Server shutting down")
 				return nil
 			case isTimeout(err):
-				logger.Debug("Server timeout", zap.String("details", err.Error()))
+				logger.Debug("Accept timeout", zap.Error(err))
 				return nil
 			default:
 				logger.Error("Accept failed", zap.Error(err))
 				return err
 			}
 		}
+		// Debug log for new connection
+		logger.Debug("Accepted new connection", zap.String("remote-addr", conn.RemoteAddr().String()))
 		go s.handleSession(ctx, conn)
 	}
-
 }
 
 func (s *Server) handleSession(ctx context.Context, conn quic.Connection) {
@@ -214,18 +129,18 @@ func (s *Server) handleSession(ctx context.Context, conn quic.Connection) {
 		stream, err := conn.AcceptStream(ctx)
 		if err != nil {
 			switch {
-
 			case isGracefulClose(err) || ctx.Err() != nil:
-				logger.Info("Session closed", zap.String("details", err.Error()))
+				logger.Info("Session closed", zap.Error(err))
 				return
 			case isTimeout(err):
-				logger.Debug("Session timeout", zap.String("details", err.Error()))
+				logger.Debug("Session timeout", zap.Error(err))
 				return
 			default:
 				logger.Error("Error accepting stream", zap.Error(err))
 				return
 			}
 		}
+		logger.Debug("Accepted new stream", zap.String("stream-id", fmt.Sprintf("%d", stream.StreamID())))
 		go s.handleStream(ctx, stream)
 	}
 }
@@ -236,125 +151,4 @@ func (s *Server) handleStream(ctx context.Context, stream quic.Stream) {
 	defer stream.Close()
 	defer func() {
 		if r := recover(); r != nil {
-			logger.Error("Stream panic", zap.Any("recover", r), zap.Stack("stack"))
-			stream.CancelRead(0)
-			stream.CancelWrite(0)
-		}
-	}()
-	var req struct {
-		ServiceMethod string
-		Args          []any
-	}
-	err := codec.Unmarshal(stream, &req)
-	if err != nil {
-		switch {
-		case isGracefulClose(err) || ctx.Err() != nil:
-			logger.Debug("Stream closed by peer", zap.String("details", err.Error()))
-		case isTimeout(err):
-			logger.Debug("Stream timeout", zap.String("details", err.Error()))
-		default:
-			logger.Warn("Decode failed; closing stream", zap.String("details", err.Error()))
-		}
-		stream.CancelRead(0)
-		stream.CancelWrite(0)
-		return
-	}
-
-	resp, err := s.callMethod(req.ServiceMethod, req.Args)
-	if err != nil {
-		logger.Error("Error calling method", zap.Error(err))
-		if e := codec.Marshal(stream, ZapResponse{Value: struct{ Error string }{err.Error()}}); e != nil {
-			logger.Error("Error encoding error reply", zap.Error(e))
-			stream.CancelWrite(0)
-			return
-		}
-		return
-	}
-	err = codec.Marshal(stream, ZapResponse{Value: resp})
-	if err != nil {
-		logger.Error("Error encoding response", zap.Error(err))
-		stream.CancelWrite(0)
-		return
-	}
-}
-
-func (s *Server) callMethod(serviceMethod string, args []any) (any, error) {
-	logger := s.logger
-	serviceName, methodName, found := parseServiceMethod(serviceMethod)
-	if !found {
-		logger.Error("Invalid service method")
-		return nil, fmt.Errorf("invalid service method: %s", serviceMethod)
-	}
-
-	service, ok := s.services[serviceName]
-	if !ok {
-		logger.Error("Service not found")
-		return nil, fmt.Errorf("service not found: %s", serviceName)
-	}
-
-	method := reflect.ValueOf(service).MethodByName(methodName)
-	if !method.IsValid() {
-		logger.Error("Method not found")
-		return nil, fmt.Errorf("method not found: %s", methodName)
-	}
-
-	reflectArgs := make([]reflect.Value, len(args))
-	for i, arg := range args {
-		reflectArgs[i] = reflect.ValueOf(arg)
-	}
-
-	results := method.Call(reflectArgs)
-
-	if len(results) > 0 {
-		lastResult := results[len(results)-1]
-		if lastResult.Type().Implements(reflect.TypeOf((*error)(nil)).Elem()) {
-			if !lastResult.IsNil() {
-				return nil, lastResult.Interface().(error)
-			}
-			results = results[:len(results)-1]
-		}
-	}
-
-	if len(results) == 1 {
-		return results[0].Interface(), nil
-	}
-
-	response := make([]interface{}, len(results))
-	for i, result := range results {
-		response[i] = result.Interface()
-	}
-
-	return response, nil
-}
-
-func parseServiceMethod(serviceMethod string) (string, string, bool) {
-	for i := 0; i < len(serviceMethod); i++ {
-		if serviceMethod[i] == '.' {
-			return serviceMethod[:i], serviceMethod[i+1:], true
-		}
-	}
-	return "", "", false
-}
-
-func generateTLSConfig() *tls.Config {
-	key, err := rsa.GenerateKey(rand.Reader, 1024)
-	if err != nil {
-		panic(err)
-	}
-	template := x509.Certificate{SerialNumber: big.NewInt(1)}
-	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
-	if err != nil {
-		panic(err)
-	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
-
-	tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil {
-		panic(err)
-	}
-	return &tls.Config{
-		Certificates: []tls.Certificate{tlsCert},
-		NextProtos:   []string{"zaprpc"},
-	}
-}
+			logger.Error("Stream panic", zap
